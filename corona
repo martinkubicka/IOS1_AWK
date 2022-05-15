@@ -1,0 +1,553 @@
+#!/bin/bash
+
+export POSIXLY_CORRECT=yes
+
+#function for printing usage of program to the user
+usage() {
+    echo "USAGE: ./corona [-h] [FILTERS] [COMMAND] [LOG [LOG2 [...]]";
+}
+
+#function for getting arguments from command line
+get_arguments() {
+    #variable to check if command was set
+    COMMAND_SET=0
+    #variable to check if file was set
+    FILE_SET=0
+    for i in $@
+    do 
+        #check if agrument is .csv file
+        if [[ $i == *".csv" ]]
+        then
+            FILES+=($i)
+            FILE_SET=1
+        #check if argument is .gz file
+        elif [[ $i == *".gz" ]]
+        then
+            #unzipping file and saving lines
+            FILES="$(gzip -cd "$i")"
+            FILE_SET=1
+        #check if argument is .bz2 file
+        elif [[ $i == *".bz2" ]]
+        then
+            #unzipping file and saving lines
+            FILES="$(bzip2 -cd "$i")"
+            FILE_SET=1
+        #processing commands
+        else 
+            #condition checks if there is just one command
+            if [ $COMMAND_SET -eq 1 ]
+            then
+                echo "You can use just one command in one run." >&2
+                exit 1
+            #saving command
+            else
+                COMMAND_SET=1
+                COMMANDS+=($i)
+            fi
+        fi
+    done
+    
+    #if there is not file program will get input from stdin
+    if [ $FILE_SET -eq 0 ]
+    then
+        FILES=$(cat)
+    fi
+
+    #checking if file name is not forbidden
+    if [ -f "$FILES" ]
+    then
+        for i in ${FILES[@]}
+        do
+            for j in ${FORBIDDEN[@]}
+            do  
+                if [ "$i" == "$j."* ]
+                then
+                    echo "Name of file cannot be one of commands names." >&2
+                    exit 1
+                fi
+
+            done
+
+            for k in ${FORBIDDEN_FILTERS[@]}
+            do
+                if [ "$i" == "$k."* ]
+                then
+                    echo "Name of file cannot be one of filter names." >&2
+                    exit 1
+                fi
+            done
+        done
+    fi
+}
+
+#function for checking validity of input data
+check_validity() {
+    #storing header of each file
+    header="id,datum,vek,pohlavi,kraj_nuts_kod,okres_lau_kod,nakaza_v_zahranici,nakaza_zeme_csu_kod,reportovano_khs"
+
+    #checking invalid format of age and invalid format of date
+    if [ -f "$FILES" ]
+    then
+        for i in ${FILES[@]}
+        do
+            invalid_age=$(cat $i | awk -F, 'NR==1{next} $3~/^[[:space:]]{0,}[0-9]{1,}[[:space:]]{0,}$/{next} NF>1 {if (match($3, /[^ ]/)){print $0}}')
+            invalid_date=$(cat $i | awk -F, 'NR==1{next} $2~/^[[:space:]]{0,}[0-9][0-9][0-9][0-9]-((0[13578]|1[02])-(0[1-9]|[12][0-9]|3[01]))|((0[469]|11)-(0[1-9]|[12][0-9]|30))|(02-(0[1-9]|[12][0-9]))[[:space:]]{0,}$/{next} NF>1 {if (match($2, /[^ ]/)){print $0}}')
+        done
+    else
+        invalid_age=$(echo $FILES | awk -F, 'NR==1{next} $3~/^[[:space:]]{0,}[0-9]{1,}[[:space:]]{0,}$/{next} NF>1 {if (match($3, /[^ ]/)){print $0}}')
+        invalid_date=$(echo $FILES | awk -F, 'NR==1{next} $2~/^[[:space:]]{0,}[0-9][0-9][0-9][0-9]-((0[13578]|1[02])-(0[1-9]|[12][0-9]|3[01]))|((0[469]|11)-(0[1-9]|[12][0-9]|30))|(02-(0[1-9]|[12][0-9]))[[:space:]]{0,}$/{next} NF>1 {if (match($2, /[^ ]/)){print $0}}')
+    fi
+
+    #creating correct_lines variable where will be only valid lines
+    if [ -f "$FILES" ]
+    then
+        correct_lines=""
+        for j in ${FILES[@]}
+        do
+            correct_lines+=$(cat $j)
+        done
+    else
+        correct_lines=$(echo "$FILES")
+    fi
+
+    #removing invalid date from correct_lines variable
+    IFS=$'\n' tmp=($invalid_date)
+    for i in ${tmp[@]}
+    do
+        correct_lines=$(echo "$correct_lines" | sed "s/$i//g") 
+    done
+
+    #removing invalid age from correct_lines variable
+    IFS=$'\n' tmp=($invalid_age)
+    for i in ${tmp[@]}
+    do
+        correct_lines=$(echo "$correct_lines" | sed "s/$i//g") 
+    done
+
+    #removing header and whitespaces from correct_lines variable
+    correct_lines=$(echo "$correct_lines" | sed "s/$header//g" | sed "s/ \{1,\}//g" | sed "s/\t\{1,\}//g")  
+}
+
+#function for making histogram or printing results without graph
+make_graph_function() {
+    #getting width if wasnt set by user
+    local fun_width=$1
+    if ! [[ "$fun_width" == *":"* ]]
+    then
+        shift
+    fi
+    local arr="$@"
+
+    #adding to array None
+    if [ $NONE -gt 0 ] && [ $CALLED_BY_COUNTRIES -eq 0 ]
+    then
+        if [ $CALLED_BY_AGE -eq 1 ]
+        then
+            arr+="\nNone  : $NONE" 
+        else
+            arr+="\nNone: $NONE" 
+        fi
+    fi
+
+    #if user use filer -s
+    if [ $GRAPH -eq 1 ]
+    then
+        #getting max number from array
+        max=$(echo "$arr"|sed 's/.*: //g'|awk 'BEGIN{max=-1} {if($0>max){max=$0}} END{print max}')
+
+        #if width wasnt set by user
+        if [ $WIDTH -eq -1 ]
+        then
+            local one_hashtag=$fun_width
+        else
+            #else width was set by user
+            local one_hashtag=$((max / WIDTH))
+        fi
+
+        #checking if there will be division by zero
+        if [ $one_hashtag -eq 0 ]
+        then
+            echo "Division by zero. Type other number to filter -s" >&2
+            exit 1
+        fi
+        #priting result as histogram
+        printf "$arr"| awk -F: -v hashtag=$one_hashtag 'BEGIN{hashtag_string=""}{for(i=0; i<($2/hashtag)-1;++i){if (hashtag_string == ""){hashtag_string=hashtag_string " #"}else {hashtag_string=hashtag_string "#"}}; print $1 ":"hashtag_string ;hashtag_string=""}'
+    else
+        #priting result as numbers
+        printf "$arr" | awk '$0'
+    fi
+}
+
+#function for counting how many people was infected
+infected_function() {
+    echo "$correct_lines"  | awk -F, -v A="$AFTER" -v B="$BEFORE" -v G="$GENDER" -v D="$date" -v VG="$valid_gender" 'NF<2{next} BEGIN{count=0; a_valid=0; b_valid=0; g_valid=0} {if (A==1){if ($2 >= D) {a_valid=1}} else {a_valid=1}; if (B==1){if ($2 <= D) {b_valid=1}} else {b_valid=1}; if (G==1){if ($4 == VG) {g_valid=1}} else {g_valid=1}; if (a_valid==1 && b_valid==1 && g_valid==1){count++}; a_valid=0; b_valid=0; g_valid=0} END{print count}'
+}
+
+#function for priting file data
+merge_function() {
+    echo $header
+    echo "$correct_lines" | awk -F, -v A="$AFTER" -v B="$BEFORE" -v G="$GENDER" -v D="$date" -v VG="$valid_gender" 'NF<2{next} BEGIN{a_valid=0; b_valid=0; g_valid=0} {if (A==1){if ($2 >= D) {a_valid=1}} else {a_valid=1}; if (B==1){if ($2 <= D) {b_valid=1}} else {b_valid=1}; if (G==1){if ($4 == VG) {g_valid=1}} else {g_valid=1}; if (a_valid==1 && b_valid==1 && g_valid==1){print $0}; a_valid=0; b_valid=0; g_valid=0}'
+}
+
+#function for printing filtered gender data
+gender_function() {
+    gender_data=$(echo "$correct_lines" | awk -F, -v A="$AFTER" -v B="$BEFORE" -v G="$GENDER" -v D="$date" -v VG="$valid_gender" 'NF<2{next} BEGIN{a_valid=0; b_valid=0; g_valid=0; count_none=0} {if (A==1){if ($2 >= D) {a_valid=1}} else {a_valid=1}; if (B==1){if ($2 <= D) {b_valid=1}} else {b_valid=1}; if (G==1){if ($4 == VG) {g_valid=1}} else {g_valid=1}; if (a_valid==1 && b_valid==1 && g_valid==1){if (match($4, /[^ ]/)){arr[$4]+=1} else {count_none+=1}}; a_valid=0; b_valid=0; g_valid=0} END{print "M: "arr["M"]; print "Z: "arr["Z"]; if (count_none != 0){print count_none} }')
+    NONE=$(echo "$gender_data" | sed -n 3p) 
+    #checking if there was some none data
+    if ! [[ $NONE =~ $number_condition ]]
+    then
+        NONE=0
+    fi
+    if [ $NONE -ne 0 ]
+    then
+        gender_data=$(echo "$gender_data" | sed '$d')
+    fi
+    #calling function for printing data
+    make_graph_function $GENDER_WIDTH "$gender_data"
+}
+
+#function for priting filtered age data
+age_function() {
+    CALLED_BY_AGE=1
+    age_data=$(echo "$correct_lines" | awk -F, -v A="$AFTER" -v B="$BEFORE" -v G="$GENDER" -v D="$date" -v VG="$valid_gender" 'NF<2{next} BEGIN{a_valid=0; b_valid=0; g_valid=0; zero_five=0; six_fifteen=0; sixteen_twentyfive=0; twentysix_thirtyfive=0; thirtysix_fortyfive=0; fortysix_fiftyfive=0; fiftysix_sixtyfive=0; sixtysix_seventyfive=0; seventysix_eightyfive=0; eightysix_ninetyfive=0; ninetysix_hundredfive=0; more_then_hundredfive=0; count_none=0} 
+    {if (A==1){if ($2 >= D) {a_valid=1}} else {a_valid=1}; if (B==1){if ($2 <= D) {b_valid=1}} else {b_valid=1}; 
+    if (G==1){if ($4 == VG) {g_valid=1}} else {g_valid=1}; if (a_valid==1 && b_valid==1 && g_valid==1)
+    {if (match($3, /[^ ]/)){if ($3 <= 5){zero_five+=1}else if($3<=15){six_fifteen+=1}else if($3<=25){sixteen_twentyfive+=1}else if($3<=35){twentysix_thirtyfive+=1}else if ($3<=45){thirtysix_fortyfive+=1}else if($3<=55){fortysix_fiftyfive+=1}else if($3<=65){fiftysix_sixtyfive+=1}else if($3<=75){sixtysix_seventyfive+=1}else if($3<=85){seventysix_eightyfive+=1}else if($3<=95){eightysix_ninetyfive+=1}else if($3<=105){ninetysix_hundredfive+=1}else{more_then_hundredfive+=1}} else{count_none+=1}}; a_valid=0; b_valid=0; g_valid=0} 
+    END{ print "0-5   : "zero_five; print "6-15  : "six_fifteen; print "16-25 : "sixteen_twentyfive; print "26-35 : "twentysix_thirtyfive; print "36-45 : "thirtysix_fortyfive; print "46-55 : "fortysix_fiftyfive; print "56-65 : "fiftysix_sixtyfive; print "66-75 : "sixtysix_seventyfive; print "76-85 : "seventysix_eightyfive; print "86-95 : "eightysix_ninetyfive; print "96-105: "ninetysix_hundredfive; print ">105  : "more_then_hundredfive;
+    if (count_none != 0){print count_none}}')
+    #checking if there was some none data
+    NONE=$(echo "$age_data" | tail -n 1)
+    if ! [[ $NONE =~ $number_condition ]]
+    then
+        NONE=0
+    fi
+    if [ $NONE -ne 0 ]
+    then
+        age_data=$(echo "$age_data" | sed '$d')
+    fi
+    #calling function for printing data
+    make_graph_function $AGE_WIDTH "$age_data"
+}
+
+#function for counting how many people were infected each day
+daily_function() {
+    daily_data=$(echo "$correct_lines" | awk -F, -v A="$AFTER" -v B="$BEFORE" -v G="$GENDER" -v D="$date" -v VG="$valid_gender" 'NF<2{next} BEGIN{a_valid=0; b_valid=0; g_valid=0; count_none=0; count_dates=0} {if (A==1){if ($2 >= D) {a_valid=1}} else {a_valid=1};if (B==1){if ($2 <= D) {b_valid=1}} else {b_valid=1}; if (G==1){if ($4 == VG) {g_valid=1}} else {g_valid=1};if (a_valid==1 && b_valid==1 && g_valid==1){if (match($2, /[^ ]/)){arr[$2]+=1;if (arr[$2]==1){dates[count_dates]=$2; count_dates+=1}} else {count_none+=1}}; a_valid=0; b_valid=0; g_valid=0} END{ for (i=0;i<count_dates;++i){print dates[i]": "arr[dates[i]]}; if (count_none != 0){print count_none}}') 
+    NONE=$(echo "$daily_data" | tail -n 1)
+    #checking if there was some none data
+    if ! [[ $NONE =~ $number_condition ]]
+    then
+        NONE=0
+    fi
+    if [ $NONE -ne 0 ]
+    then
+        daily_data=$(echo "$daily_data" | sed '$d' | sort)
+    fi
+    #calling function for printing data
+    make_graph_function $DAILY_WIDTH "$daily_data"
+}
+
+#function for counting how many people were infected each month
+monthly_function() {
+    monthly_data=$(echo "$correct_lines" | awk -F, -v A="$AFTER" -v B="$BEFORE" -v G="$GENDER" -v D="$date" -v VG="$valid_gender" 'NF<2{next} BEGIN{a_valid=0; b_valid=0; g_valid=0; count_none=0; count_dates=0} {if (A==1){if ($2 >= D) {a_valid=1}} else {a_valid=1};if (B==1){if ($2 <= D) {b_valid=1}} else {b_valid=1}; if (G==1){if ($4 == VG) {g_valid=1}} else {g_valid=1};if (a_valid==1 && b_valid==1 && g_valid==1){if (match($2, /[^ ]/)){arr[substr($2, 1, length($2)-3)]+=1;if (arr[substr($2, 1, length($2)-3)]==1){dates[count_dates]=substr($2, 1, length($2)-3); count_dates+=1}} else {count_none+=1}}; a_valid=0; b_valid=0; g_valid=0} END{ for (i=0;i<count_dates;++i){print dates[i]": "arr[dates[i]]}; if (count_none != 0){print count_none}}') 
+    NONE=$(echo "$monthly_data" | tail -n 1)
+    #checking if there was some none data
+    if ! [[ $NONE =~ $number_condition ]]
+    then
+        NONE=0
+    fi
+    if [ $NONE -ne 0 ]
+    then
+        monthly_data=$(echo "$monthly_data" | sed '$d' | sort)
+    fi
+    #calling function for printing data
+    make_graph_function $MONTHLY_WIDTH "$monthly_data"
+}
+
+#function for counting how many people were infected each year
+yearly_function() {
+    yearly_data=$(echo "$correct_lines" | awk -F, -v A="$AFTER" -v B="$BEFORE" -v G="$GENDER" -v D="$date" -v VG="$valid_gender" 'NF<2{next} BEGIN{a_valid=0; b_valid=0; g_valid=0; count_none=0; count_dates=0} {if (A==1){if ($2 >= D) {a_valid=1}} else {a_valid=1};if (B==1){if ($2 <= D) {b_valid=1}} else {b_valid=1}; if (G==1){if ($4 == VG) {g_valid=1}} else {g_valid=1};if (a_valid==1 && b_valid==1 && g_valid==1){if (match($2, /[^ ]/)){arr[substr($2, 1, length($2)-6)]+=1;if (arr[substr($2, 1, length($2)-6)]==1){dates[count_dates]=substr($2, 1, length($2)-6); count_dates+=1}} else {count_none+=1}}; a_valid=0; b_valid=0; g_valid=0} END{ for (i=0;i<count_dates;++i){print dates[i]": "arr[dates[i]]}; if (count_none != 0){print count_none}}') 
+    NONE=$(echo "$yearly_data" | tail -n 1)
+    #checking if there was some none data
+    if ! [[ $NONE =~ $number_condition ]]
+    then
+        NONE=0
+    fi
+    if [ $NONE -ne 0 ]
+    then
+        yearly_data=$(echo "$yearly_data" | sed '$d' | sort)
+    fi
+    #calling function for printing data
+    make_graph_function $YEARLY_WIDTH "$yearly_data"
+}
+
+#function for counting how many people were infected in each country
+countries_function() {
+    #special variable fro countries_function
+    #is there because we dont want to print none
+    CALLED_BY_COUNTRIES=1
+    NONE=0
+    countries_data=$(echo "$correct_lines" | awk -F, -v A="$AFTER" -v B="$BEFORE" -v G="$GENDER" -v D="$date" -v VG="$valid_gender" 'NF<2{next} BEGIN{a_valid=0; b_valid=0; g_valid=0; count_dates=0} {if (A==1){if ($2 >= D) {a_valid=1}} else {a_valid=1};if (B==1){if ($2 <= D) {b_valid=1}} else {b_valid=1}; if (G==1){if ($4 == VG) {g_valid=1}} else {g_valid=1};if (a_valid==1 && b_valid==1 && g_valid==1){if (match($8, /[^ ]/) && $8 != "CZ"){arr[$8]+=1;if (arr[$8]==1){dates[count_dates]=$8; count_dates+=1}}}; a_valid=0; b_valid=0; g_valid=0} END{ for (i=0;i<count_dates;++i){print dates[i]": "arr[dates[i]]}}' | sort) 
+    #calling function for printing data
+    make_graph_function $COUNTRIES_WIDTH "$countries_data"
+}
+
+#function for counting how many people were infected in each district
+districts_function() {
+    districts_data=$(echo "$correct_lines" | awk -F, -v A="$AFTER" -v B="$BEFORE" -v G="$GENDER" -v D="$date" -v VG="$valid_gender" 'NF<2{next} BEGIN{a_valid=0; b_valid=0; g_valid=0; count_none=0; count_dates=0} {if (A==1){if ($2 >= D) {a_valid=1}} else {a_valid=1};if (B==1){if ($2 <= D) {b_valid=1}} else {b_valid=1}; if (G==1){if ($4 == VG) {g_valid=1}} else {g_valid=1};if (a_valid==1 && b_valid==1 && g_valid==1){if (match($6, /[^ ]/)){arr[$6]+=1;if (arr[$6]==1){dates[count_dates]=$6; count_dates+=1}} else {count_none+=1}}; a_valid=0; b_valid=0; g_valid=0} END{ for (i=0;i<count_dates;++i){print dates[i]": "arr[dates[i]]}; if (count_none != 0){print count_none}}') 
+    NONE=$(echo "$districts_data" | tail -n 1)
+    #checking if there was some none data
+    if ! [[ $NONE =~ $number_condition ]]
+    then
+        NONE=0
+    fi
+    if [ $NONE -ne 0 ]
+    then
+        districts_data=$(echo "$districts_data" | sed '$d' | sort)
+    fi
+    #calling function for printing datas
+    make_graph_function $DISTRICTS_WIDTH "$districts_data"
+}
+
+#function for counting how many people were infected in each region
+regions_function() {
+    regions_data=$(echo "$correct_lines" | awk -F, -v A="$AFTER" -v B="$BEFORE" -v G="$GENDER" -v D="$date" -v VG="$valid_gender" 'NF<2{next} BEGIN{a_valid=0; b_valid=0; g_valid=0; count_none=0; count_dates=0} {if (A==1){if ($2 >= D) {a_valid=1}} else {a_valid=1};if (B==1){if ($2 <= D) {b_valid=1}} else {b_valid=1}; if (G==1){if ($4 == VG) {g_valid=1}} else {g_valid=1};if (a_valid==1 && b_valid==1 && g_valid==1){if (match($5, /[^ ]/)){arr[$5]+=1;if (arr[$5]==1){dates[count_dates]=$5; count_dates+=1}} else {count_none+=1}}; a_valid=0; b_valid=0; g_valid=0} END{ for (i=0;i<count_dates;++i){print dates[i]": "arr[dates[i]]}; if (count_none != 0){print count_none}}') 
+    NONE=$(echo "$regions_data" | tail -n 1)
+    #checking if there was some none data
+    if ! [[ $NONE =~ $number_condition ]]
+    then
+        NONE=0
+    fi
+    if [ $NONE -ne 0 ]
+    then
+        regions_data=$(echo "$regions_data" | sed '$d' | sort)
+    fi
+    #calling function for printing datas
+    make_graph_function $REGIONS_WIDTH "$regions_data"
+}
+
+#function for checking if date entered by user is in right format (filter -a and -b)
+get_valid_date() {
+    var="not"
+    var=$(echo "$1" | awk '$0~/^[0-9][0-9][0-9][0-9]-((0[13578]|1[02])-(0[1-9]|[12][0-9]|3[01]))|((0[469]|11)-(0[1-9]|[12][0-9]|30))|(02-(0[1-9]|[12][0-9]))$/{print "ok"}')
+    if [ $var == "not" ]
+    then
+        echo "Bad format of date. It must be YYYY-MM-DD." >&2
+        exit 1
+    else
+        date="$1"
+    fi
+}
+
+#function for checking if user input was right (filter -g) 
+get_valid_gender() {
+    if [ $@ == "M" ]
+    then
+        valid_gender="M"
+    elif [ $@ == "Z" ]
+    then
+        valid_gender="Z"
+    else
+        echo "Gender filter can be just M or Z." >&2
+        exit 1
+    fi
+}
+
+#function for getting user input (filter -s)
+get_valid_graph() {
+    WIDTH=0
+    local check_number='^[0-9]+$'
+    #checking if user type optional parameter for filter -s
+    for i in "${FORBIDDEN[@]}"
+    do
+        if [ $@ == $i ]
+        then
+            COMMANDS+=($i)
+            WIDTH=-1
+            break
+        fi
+    done
+
+    #if user do not type optional parameter for filter -s
+    if [ $WIDTH -eq -1 ]
+    then
+        GENDER_WIDTH=100000
+        AGE_WIDTH=10000
+        DAILY_WIDTH=500
+        MONTHLY_WIDTH=10000
+        YEARLY_WIDTH=100000
+        COUNTRIES_WIDTH=100
+        DISTRICTS_WIDTH=1000
+        REGIONS_WIDTH=10000
+    #checking if user parameter is number
+    elif ! [[ $@ =~ $check_number ]]
+    then
+        echo "-s filter must be number." >&2
+        exit 1
+    elif [ $@ -eq 0 ]
+    then
+        echo "-s filter cant be 0." >&2
+        exit 1
+    else
+        WIDTH=$@
+    fi
+}
+
+#function for checking if each filter was used only one time
+check_filter_count() {
+    if [ $1 -eq 1 ]
+    then
+        echo "You can use each filter just one time." >&2
+        exit 1
+    fi
+}
+
+##VARIABLES
+#forbidden words and filters
+FORBIDDEN=("infected" "merge" "gender" "age" "daily" "monthly" "yearly" "countries" "districts" "regions")
+FORBIDDEN_FILTERS=("a" "b" "g" "s")
+
+#variable for program to know if there wasnt any filters and any commands 
+NOFILTER_NOCOMMAND=0
+
+#special variable for countries_function -> program will know that user command was countries
+CALLED_BY_COUNTRIES=0
+#special variable for age becuase there is other text alignment
+CALLED_BY_AGE=0 
+
+#variables for getting know that filter was set
+AFTER=0
+BEFORE=0
+GENDER=0
+GRAPH=0
+
+#files and commands array
+FILES=()
+COMMANDS=()
+
+#parsing filters
+while getopts "ha:b:g:s:" OPTIONS; do
+    case "${OPTIONS}" in
+        h)
+            usage
+            echo
+            echo "    -h                  Vypíše nápovedu
+
+FILTERS:
+    -a <DATETIME>       Filter after - sú uvažované záznamy po tomto dátume a vrátane tohto dátumu. DATETIME je vo formáte YYYY-MM-DD.
+    -b <DATETIME>       Filter before - sú uvažované záznamy pred týmto dátumom a vrátane tohto dátumu. DATETIME je vo formáte YYYY-MM-DD.
+    -g <GENDER>         Sú uvažované záznamy iba určeného pohlavia. GENDER môže byt M (muži) alebo Z (ženy).
+    -s <WIDTH>          U príkazov gender, age, daily, monthly, yearly, countries, districts a regions vypisuje data nie číselne ale graficky v podobe histogramov. Nepovinný parameter WIDTH nastavuje šírku histogramu na WIDTH. 
+    
+COMMAND:
+    infected            Spočíta počet nakazených.
+    merge               Zlúči niekoľko súborov do jedného a zachováva pôvodné poradie.
+    gender              Vypíše počet nakazených pre jednotlivé pohlavia.
+    age                 Vypíše štatistiku počtu nakazených osob podľa veku.
+    daily               Vypíše štatistiku nakazených osôb pre jednotlivé dni.
+    monthly             Vypíše štatistiku nakazených osôb pre jednotlivé mesiace.
+    yearly              Vypíše štatistiku nakazených osôb pre jednotlivé roky.
+    countries           Vypíše štatistiku nakazených osôb pre jednotlivé krajiny bez Českej Republiky.
+    districts           Vypíše štatistiku nakazených osôb pre jednotlivé okresy.
+    regions             Vypíše štatistiku nakazených osôb pre jednotlivé kraje.
+
+LOG:
+    Súbor so záznamami, prípadne viac súborov keď sa použije príkaz merge. Ak nie je zadaný súbor, tak sa očakávajú záznami na štandartnom vstupe."
+            echo
+            exit 1 
+            ;;
+        a)
+            check_filter_count $AFTER
+            AFTER=1
+            get_valid_date "${OPTARG}"
+            ;;
+        b)
+            check_filter_count $BEFORE
+            BEFORE=1
+            get_valid_date "${OPTARG}"
+            ;;
+        g)  
+            check_filter_count $GENDER
+            GENDER=1
+            get_valid_gender "${OPTARG}"
+            ;;
+        s)
+            check_filter_count $GRAPH
+            GRAPH=1
+            get_valid_graph "${OPTARG}"
+            ;;
+        *)
+            echo "Filter not found.">&2
+            exit 1
+            ;;
+    esac
+    NOFILTER_NOCOMMAND=1
+done
+shift $((OPTIND-1))
+
+#condition for validating if some string consists only from numbers
+number_condition='^[0-9]+$'
+
+#calling function for getting arguments
+get_arguments "$@"
+
+#calling function for checking validity of files
+check_validity
+
+#parsing commands
+for i in "${COMMANDS[@]}"
+do
+    case $i in
+    infected)
+        infected_function
+        ;;
+    merge)
+        merge_function
+        ;;
+    gender)
+        gender_function
+        ;;
+    age)
+        age_function
+        ;;
+    daily)
+        daily_function
+        ;;
+    monthly)
+        monthly_function
+        ;;
+    yearly)
+        yearly_function
+        ;;
+    countries)
+        countries_function
+        ;;
+    districts)
+        districts_function
+        ;;
+    regions)
+        regions_function
+        ;;
+    *)
+        echo "Command not found." >&2
+        exit 1
+        ;;
+    esac
+    COMMAND_SET=1
+    NOFILTER_NOCOMMAND=1
+done
+
+#if there wasnt any filter and any command -> printing lines from stdin to stdout
+if [ $NOFILTER_NOCOMMAND -eq 0 ] || [ $COMMAND_SET -eq 0 ]
+then
+    merge_function
+fi
+
+#printing invalid lines
+if [ "$invalid_date" != "" ]
+then
+    echo "$invalid_date" | awk '{print "Invalid date: "$0}' >&2
+fi
+if [ "$invalid_age" != "" ]
+then
+    echo "$invalid_age" | awk '{print "Invalid age: "$0}' >&2
+fi
